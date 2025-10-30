@@ -71,6 +71,8 @@ To temporarily pause realtime audio playback (for example, while your agent proc
 }
 ```
 
+When Attendee detects loud meeting audio that crosses the configured `pause_threshold`, it will automatically pause its own realtime playback for 800 ms and forward the same `realtime_audio.pause_current_lecture` message (including the `bot_id` field) to your websocket listener so that your agent can temporarily stop sending additional audio.
+
 During the pause window, any queued realtime audio chunks are held until playback resumes.
 
 ## Integration with Voice Agent APIs

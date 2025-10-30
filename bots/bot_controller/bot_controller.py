@@ -1332,12 +1332,18 @@ class BotController:
             if message["trigger"] == RealtimeTriggerTypes.type_to_api_code(RealtimeTriggerTypes.BOT_OUTPUT_AUDIO_CHUNK):
                 chunk = b64decode(message["data"]["chunk"])
                 sample_rate = message["data"]["sample_rate"]
-                self.realtime_audio_output_manager.add_chunk(chunk, sample_rate)
+                if self.realtime_audio_output_manager:
+                    self.realtime_audio_output_manager.add_chunk(chunk, sample_rate)
+                else:
+                    logger.warning("Received bot_output_audio_chunk event but realtime_audio_output_manager is not available")
             elif message["trigger"] == RealtimeTriggerTypes.type_to_api_code(RealtimeTriggerTypes.PAUSE_CURRENT_LECTURE):
                 duration_ms = message["data"].get("duration", 0)
                 if duration_ms > 0:
                     logger.info(f"Received pause_current_lecture event with duration {duration_ms}ms")
-                    self.realtime_audio_output_manager.pause_playback(duration_ms=duration_ms)
+                    if self.realtime_audio_output_manager:
+                        self.realtime_audio_output_manager.pause_playback(duration_ms=duration_ms)
+                    else:
+                        logger.warning("Received pause_current_lecture event but realtime_audio_output_manager is not available")
                 else:
                     logger.warning(f"Received pause_current_lecture event with invalid duration: {duration_ms}")
             else:

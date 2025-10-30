@@ -22,7 +22,9 @@ To enable realtime audio streaming, configure the `websocket_settings.audio` par
 
 Configuration options:
 - `sample_rate`: Can be `8000`, `16000`, or `24000` and defaults to `16000`. It determines the sample rate of the audio chunks you receive from Attendee.
-- `threshold` (optional): RMS audio level threshold for automatic pause. When the mixed audio from the call exceeds this value, the bot will automatically pause its audio playback for 800ms. This prevents the bot from talking over participants. Typical values range from 100 (very sensitive) to 2000 (less sensitive).
+- `threshold` (optional): RMS audio level threshold for automatic pause. When the mixed audio from the call exceeds this value, the bot will automatically pause its audio playback for 800ms. This prevents the bot from talking over participants. 
+  - **For Google Meet, Teams, and Zoom Web (float audio)**: Typical values range from 100 to 500 (100 = very sensitive, 500 = moderate)
+  - **For Zoom SDK (PCM audio)**: Typical values range from 500 to 3000 (500 = very sensitive, 3000 = moderate)
 
 ## Websocket Message Format
 
@@ -99,11 +101,15 @@ The bot can automatically pause audio playback when the audio level from the cal
 
 To enable this feature:
 
-1. Set an audio threshold value (RMS audio level) in your bot configuration
+1. Set an audio threshold value (RMS audio level) in your bot configuration (see example above)
 2. When the mixed audio from the call exceeds this threshold, the bot will automatically pause playback for 800ms
 3. This allows participants to speak without the bot interrupting them
 
-The threshold is configurable and can be adjusted based on your use case. Higher values mean the bot will only pause when there's louder audio (e.g., someone speaking loudly), while lower values will make the bot more sensitive to any audio in the call.
+**Important**: The threshold values depend on the meeting platform and audio format:
+- **Google Meet, Teams, Zoom Web**: Use lower thresholds (100-500) as these platforms use 32-bit float audio
+- **Zoom SDK**: Use higher thresholds (500-3000) as it uses 16-bit PCM audio
+
+Start with a moderate value and adjust based on testing. If the bot pauses too often, increase the threshold. If it talks over participants, decrease the threshold.
 
 ## Error Messages
 

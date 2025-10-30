@@ -268,7 +268,19 @@ class BotController:
 
         # Check audio level and pause realtime audio output if needed
         if self.realtime_audio_output_manager:
-            self.realtime_audio_output_manager.check_audio_level_and_pause_if_needed(chunk)
+            try:
+                # Determine sample width based on audio format
+                # Float audio = 4 bytes per sample (32-bit), PCM audio = 2 bytes per sample (16-bit)
+                audio_format = self.get_audio_format()
+                sample_width = 4 if "F32LE" in audio_format else 2
+                self.realtime_audio_output_manager.check_audio_level_and_pause_if_needed(chunk, sample_width)
+            except Exception as e:
+                # Don't crash if audio level check fails
+                if not hasattr(self, 'audio_level_check_callback_error_count'):
+                    self.audio_level_check_callback_error_count = 0
+                self.audio_level_check_callback_error_count += 1
+                if self.audio_level_check_callback_error_count % 100 == 1:
+                    logger.error(f"Error in audio level check callback (error #{self.audio_level_check_callback_error_count}): {e}")
 
         if not self.websocket_audio_client:
             return

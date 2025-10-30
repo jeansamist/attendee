@@ -158,21 +158,30 @@ class RealtimeAudioOutputManager:
         self.audio_threshold = threshold
         logger.info(f"RealtimeAudioOutputManager: Audio threshold set to {threshold}")
 
-    def check_audio_level_and_pause_if_needed(self, audio_chunk: bytes):
+    def check_audio_level_and_pause_if_needed(self, audio_chunk: bytes, sample_width: int = SAMPLE_WIDTH):
         """Check if the audio level exceeds the threshold and pause if needed.
         
         Args:
-            audio_chunk: Raw PCM audio data from the call (mixed audio)
+            audio_chunk: Raw audio data from the call (mixed audio) - can be PCM or float
+            sample_width: Width of each sample in bytes (2 for 16-bit PCM, 4 for 32-bit float)
         """
         if self.audio_threshold is None:
             return  # Threshold not set, no auto-pause
 
-        # Calculate RMS (Root Mean Square) audio level
-        rms = audioop.rms(audio_chunk, SAMPLE_WIDTH)
-        
-        if rms > self.audio_threshold:
-            logger.info(f"RealtimeAudioOutputManager: Audio level {rms} exceeds threshold {self.audio_threshold}, pausing playback")
-            self.pause_playback(duration_ms=int(self.auto_pause_duration_seconds * 1000))
+        try:
+            # Calculate RMS (Root Mean Square) audio level
+            rms = audioop.rms(audio_chunk, sample_width)
+            
+            if rms > self.audio_threshold:
+                logger.info(f"RealtimeAudioOutputManager: Audio level {rms} exceeds threshold {self.audio_threshold}, pausing playback")
+                self.pause_playback(duration_ms=int(self.auto_pause_duration_seconds * 1000))
+        except Exception as e:
+            # Log error but don't crash if audio format is incompatible
+            if not hasattr(self, 'audio_level_check_error_count'):
+                self.audio_level_check_error_count = 0
+            self.audio_level_check_error_count += 1
+            if self.audio_level_check_error_count % 100 == 1:
+                logger.error(f"RealtimeAudioOutputManager: Error checking audio level (error #{self.audio_level_check_error_count}): {e}")
 
     def pause_playback(self, duration_ms: int):
         """Pause audio playback for a specified duration.

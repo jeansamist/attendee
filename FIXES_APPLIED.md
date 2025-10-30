@@ -1,6 +1,36 @@
 # Fixes Applied to Real-Time Audio Pause Features
 
-## Problem Identified
+## Latest Fix (Oct 30, 2025)
+
+### Problem: Null Pointer Exception in WebSocket Event Handlers
+
+**Issue**: The `pause_current_lecture` and `bot_output_audio_chunk` WebSocket event handlers did not check if `realtime_audio_output_manager` exists before calling methods on it, causing crashes when the manager is unavailable.
+
+**Root Cause**: Missing null checks in `on_message_from_websocket_audio()` method, inconsistent with other parts of the codebase that properly check for manager availability.
+
+**Fix Applied**:
+- Added defensive null checks before calling methods on `realtime_audio_output_manager`
+- Added warning logs when events are received but manager is unavailable
+- Ensures graceful degradation instead of crashes
+
+**File Modified**: `bots/bot_controller/bot_controller.py` (lines 1335-1346)
+
+```python
+# Before (would crash if manager is None):
+self.realtime_audio_output_manager.pause_playback(duration_ms=duration_ms)
+
+# After (gracefully handles None):
+if self.realtime_audio_output_manager:
+    self.realtime_audio_output_manager.pause_playback(duration_ms=duration_ms)
+else:
+    logger.warning("Received pause_current_lecture event but realtime_audio_output_manager is not available")
+```
+
+---
+
+## Previous Fix (Audio Format Handling)
+
+### Problem Identified
 
 The initial implementation had a **critical audio format handling issue** that prevented the automatic pause feature from working correctly.
 

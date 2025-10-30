@@ -51,7 +51,7 @@ from bots.models import (
 )
 from bots.webhook_payloads import chat_message_webhook_payload, participant_event_webhook_payload, utterance_webhook_payload
 from bots.webhook_utils import trigger_webhook
-from bots.websocket_payloads import mixed_audio_websocket_payload
+from bots.websocket_payloads import mixed_audio_websocket_payload, pause_current_lecture_websocket_payload
 from bots.zoom_oauth_connections_utils import get_zoom_tokens_via_zoom_oauth_app
 
 from .audio_output_manager import AudioOutputManager
@@ -363,13 +363,32 @@ class BotController:
             return
 
         if rms_value >= threshold:
+            pause_duration_seconds = self.REALTIME_AUDIO_AUTOPAUSE_DURATION_SECONDS
             logger.debug(
                 "Pausing realtime audio output for %.0f ms due to mixed audio RMS %.2f crossing threshold %.2f",
-                self.REALTIME_AUDIO_AUTOPAUSE_DURATION_SECONDS * 1000,
+                pause_duration_seconds * 1000,
                 rms_value,
                 threshold,
             )
-            self.realtime_audio_output_manager.pause_for(self.REALTIME_AUDIO_AUTOPAUSE_DURATION_SECONDS)
+
+            if getattr(self, "realtime_audio_output_manager", None):
+                self.realtime_audio_output_manager.pause_for(pause_duration_seconds)
+
+            websocket_client = getattr(self, "websocket_audio_client", None)
+            if websocket_client:
+                try:
+                    websocket_client.send_async(
+                        pause_current_lecture_websocket_payload(
+                            duration_ms=int(pause_duration_seconds * 1000),
+                            bot_object_id=self.bot_in_db.object_id,
+                        )
+                    )
+                except Exception as exc:  # pragma: no cover - defensive guard for websocket failures
+                    logger.debug(
+                        "Failed to forward pause_current_lecture event for bot %s: %s",
+                        self.bot_in_db.object_id,
+                        exc,
+                    )
 
     def get_meeting_type(self):
         meeting_type = meeting_type_from_url(self.bot_in_db.meeting_url)

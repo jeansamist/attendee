@@ -266,6 +266,10 @@ class BotController:
         if self.gstreamer_pipeline:
             self.gstreamer_pipeline.on_mixed_audio_raw_data_received_callback(chunk)
 
+        # Check audio level and pause realtime audio output if needed
+        if self.realtime_audio_output_manager:
+            self.realtime_audio_output_manager.check_audio_level_and_pause_if_needed(chunk)
+
         if not self.websocket_audio_client:
             return
 
@@ -727,6 +731,11 @@ class BotController:
             sleep_time_between_chunks_seconds=self.get_sleep_time_between_audio_output_chunks_seconds(),
             output_sample_rate=self.mixed_audio_sample_rate(),
         )
+
+        # Set audio threshold if configured
+        audio_threshold = self.bot_in_db.websocket_audio_threshold()
+        if audio_threshold is not None:
+            self.realtime_audio_output_manager.set_audio_threshold(audio_threshold)
 
         self.video_output_manager = VideoOutputManager(
             currently_playing_video_media_request_finished_callback=self.currently_playing_video_media_request_finished,
@@ -1312,6 +1321,13 @@ class BotController:
                 chunk = b64decode(message["data"]["chunk"])
                 sample_rate = message["data"]["sample_rate"]
                 self.realtime_audio_output_manager.add_chunk(chunk, sample_rate)
+            elif message["trigger"] == RealtimeTriggerTypes.type_to_api_code(RealtimeTriggerTypes.PAUSE_CURRENT_LECTURE):
+                duration_ms = message["data"].get("duration", 0)
+                if duration_ms > 0:
+                    logger.info(f"Received pause_current_lecture event with duration {duration_ms}ms")
+                    self.realtime_audio_output_manager.pause_playback(duration_ms=duration_ms)
+                else:
+                    logger.warning(f"Received pause_current_lecture event with invalid duration: {duration_ms}")
             else:
                 if not hasattr(self, "websocket_audio_error_ticker"):
                     self.websocket_audio_error_ticker = 0

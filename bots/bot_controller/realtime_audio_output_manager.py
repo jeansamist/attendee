@@ -45,6 +45,15 @@ class RealtimeAudioOutputManager:
         self.inner_chunk_buffer = b""
         self.last_chunk_time = time.time()
 
+        # Pause management
+        self.is_paused = False
+        self.pause_until_time = None
+        self.pause_lock = threading.Lock()
+
+        # Audio threshold for automatic pausing when call audio is loud
+        self.audio_threshold = None  # Set this to enable automatic pausing
+        self.auto_pause_duration_seconds = 0.8  # Resume after 800ms
+
     def add_chunk(self, chunk, sample_rate):
         # If it's been a while since we had a chunk, there's probably some "residue" in the buffer. Clear it.
         if time.time() - self.last_chunk_time > 0.15:
@@ -84,6 +93,19 @@ class RealtimeAudioOutputManager:
 
         while not self.stop_audio_thread:
             try:
+                # Check if we're paused
+                with self.pause_lock:
+                    if self.is_paused:
+                        # Check if pause duration has expired
+                        if self.pause_until_time and time.time() >= self.pause_until_time:
+                            logger.info("RealtimeAudioOutputManager: Pause duration expired, resuming playback")
+                            self.is_paused = False
+                            self.pause_until_time = None
+                        else:
+                            # Still paused, sleep a bit and check again
+                            time.sleep(0.1)
+                            continue
+
                 # Wait for audio chunk with timeout
                 chunk, sample_rate = self.audio_queue.get(timeout=1.0)
 
@@ -126,6 +148,49 @@ class RealtimeAudioOutputManager:
 
         # Convert back to bytes
         return upsampled_samples.tobytes()
+
+    def set_audio_threshold(self, threshold: int):
+        """Set the audio threshold for automatic pausing when call audio is loud.
+        
+        Args:
+            threshold: RMS audio level threshold. When call audio exceeds this, playback pauses.
+        """
+        self.audio_threshold = threshold
+        logger.info(f"RealtimeAudioOutputManager: Audio threshold set to {threshold}")
+
+    def check_audio_level_and_pause_if_needed(self, audio_chunk: bytes):
+        """Check if the audio level exceeds the threshold and pause if needed.
+        
+        Args:
+            audio_chunk: Raw PCM audio data from the call (mixed audio)
+        """
+        if self.audio_threshold is None:
+            return  # Threshold not set, no auto-pause
+
+        # Calculate RMS (Root Mean Square) audio level
+        rms = audioop.rms(audio_chunk, SAMPLE_WIDTH)
+        
+        if rms > self.audio_threshold:
+            logger.info(f"RealtimeAudioOutputManager: Audio level {rms} exceeds threshold {self.audio_threshold}, pausing playback")
+            self.pause_playback(duration_ms=int(self.auto_pause_duration_seconds * 1000))
+
+    def pause_playback(self, duration_ms: int):
+        """Pause audio playback for a specified duration.
+        
+        Args:
+            duration_ms: Duration to pause in milliseconds
+        """
+        with self.pause_lock:
+            self.is_paused = True
+            self.pause_until_time = time.time() + (duration_ms / 1000.0)
+            logger.info(f"RealtimeAudioOutputManager: Pausing playback for {duration_ms}ms")
+
+    def resume_playback(self):
+        """Resume audio playback immediately."""
+        with self.pause_lock:
+            self.is_paused = False
+            self.pause_until_time = None
+            logger.info("RealtimeAudioOutputManager: Resuming playback")
 
     def cleanup(self):
         """Stop the audio output thread and clear the queue."""

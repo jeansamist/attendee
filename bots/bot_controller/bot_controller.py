@@ -1,3 +1,4 @@
+import audioop
 import json
 import logging
 import os
@@ -77,6 +78,8 @@ logger = logging.getLogger(__name__)
 class BotController:
     # Default wait time for utterance termination (5 minutes)
     UTTERANCE_TERMINATION_WAIT_TIME_SECONDS = 300
+    REALTIME_AUDIO_AUTOPAUSE_DURATION_SECONDS = 0.8
+    REALTIME_AUDIO_AUTOPAUSE_THRESHOLD_ENV_VAR = "REALTIME_AUDIO_AUTOPAUSE_THRESHOLD"
 
     def per_participant_audio_input_manager(self):
         if self.bot_in_db.transcription_settings.deepgram_use_streaming():
@@ -281,6 +284,92 @@ class BotController:
         )
 
         self.websocket_audio_client.send_async(payload)
+
+        self.maybe_pause_realtime_audio_due_to_mixed_audio(chunk)
+
+    def get_realtime_audio_pause_threshold(self) -> float:
+        websocket_settings = (self.bot_in_db.settings or {}).get("websocket_settings", {})
+        audio_settings = websocket_settings.get("audio", {}) if websocket_settings else {}
+        threshold = audio_settings.get("pause_threshold")
+
+        if threshold is None:
+            env_value = os.getenv(self.REALTIME_AUDIO_AUTOPAUSE_THRESHOLD_ENV_VAR)
+            if env_value in (None, ""):
+                return 0.0
+
+            try:
+                threshold_value = float(env_value)
+            except (TypeError, ValueError):
+                if not getattr(self, "_invalid_pause_threshold_env_logged", False):
+                    logger.warning(
+                        "Invalid %s environment variable value '%s'. Expected a numeric value. Autopause disabled.",
+                        self.REALTIME_AUDIO_AUTOPAUSE_THRESHOLD_ENV_VAR,
+                        env_value,
+                    )
+                    self._invalid_pause_threshold_env_logged = True
+                return 0.0
+
+            if threshold_value < 0:
+                if not getattr(self, "_invalid_pause_threshold_env_logged", False):
+                    logger.warning(
+                        "%s environment variable must be non-negative. Received '%s'. Autopause disabled.",
+                        self.REALTIME_AUDIO_AUTOPAUSE_THRESHOLD_ENV_VAR,
+                        env_value,
+                    )
+                    self._invalid_pause_threshold_env_logged = True
+                return 0.0
+
+            return threshold_value
+
+        try:
+            threshold_value = float(threshold)
+        except (TypeError, ValueError):
+            if not getattr(self, "_invalid_pause_threshold_settings_logged", False):
+                logger.warning(
+                    "Invalid realtime audio pause threshold '%s' for bot %s. Expected a numeric value. Autopause disabled.",
+                    threshold,
+                    self.bot_in_db.object_id,
+                )
+                self._invalid_pause_threshold_settings_logged = True
+            return 0.0
+
+        if threshold_value < 0:
+            if not getattr(self, "_invalid_pause_threshold_settings_logged", False):
+                logger.warning(
+                    "Realtime audio pause threshold must be non-negative for bot %s. Received '%s'. Autopause disabled.",
+                    self.bot_in_db.object_id,
+                    threshold,
+                )
+                self._invalid_pause_threshold_settings_logged = True
+            return 0.0
+
+        return threshold_value
+
+    def maybe_pause_realtime_audio_due_to_mixed_audio(self, chunk: bytes):
+        if not chunk:
+            return
+
+        if not getattr(self, "realtime_audio_output_manager", None):
+            return
+
+        threshold = self.get_realtime_audio_pause_threshold()
+        if threshold <= 0:
+            return
+
+        try:
+            rms_value = audioop.rms(chunk, 2)
+        except Exception as exc:  # pragma: no cover - defensive guard for audioop edge cases
+            logger.debug("Failed to compute RMS for mixed audio chunk: %s", exc)
+            return
+
+        if rms_value >= threshold:
+            logger.debug(
+                "Pausing realtime audio output for %.0f ms due to mixed audio RMS %.2f crossing threshold %.2f",
+                self.REALTIME_AUDIO_AUTOPAUSE_DURATION_SECONDS * 1000,
+                rms_value,
+                threshold,
+            )
+            self.realtime_audio_output_manager.pause_for(self.REALTIME_AUDIO_AUTOPAUSE_DURATION_SECONDS)
 
     def get_meeting_type(self):
         meeting_type = meeting_type_from_url(self.bot_in_db.meeting_url)
@@ -1312,6 +1401,24 @@ class BotController:
                 chunk = b64decode(message["data"]["chunk"])
                 sample_rate = message["data"]["sample_rate"]
                 self.realtime_audio_output_manager.add_chunk(chunk, sample_rate)
+            elif message["trigger"] == RealtimeTriggerTypes.type_to_api_code(RealtimeTriggerTypes.PAUSE_CURRENT_LECTURE):
+                duration_ms = message.get("data", {}).get("duration")
+                if duration_ms is None:
+                    logger.warning("Received pause_current_lecture event without duration; ignoring")
+                    return
+
+                try:
+                    duration_ms = float(duration_ms)
+                except (TypeError, ValueError):
+                    logger.warning("Received pause_current_lecture event with invalid duration %s; ignoring", duration_ms)
+                    return
+
+                if duration_ms <= 0:
+                    logger.info("Received pause_current_lecture event with non-positive duration %s; ignoring", duration_ms)
+                    return
+
+                if self.realtime_audio_output_manager:
+                    self.realtime_audio_output_manager.pause_for(duration_ms / 1000.0)
             else:
                 if not hasattr(self, "websocket_audio_error_ticker"):
                     self.websocket_audio_error_ticker = 0

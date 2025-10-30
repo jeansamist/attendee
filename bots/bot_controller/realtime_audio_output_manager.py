@@ -45,6 +45,9 @@ class RealtimeAudioOutputManager:
         self.inner_chunk_buffer = b""
         self.last_chunk_time = time.time()
 
+        self.pause_lock = threading.Lock()
+        self.pause_until_timestamp = 0.0
+
     def add_chunk(self, chunk, sample_rate):
         # If it's been a while since we had a chunk, there's probably some "residue" in the buffer. Clear it.
         if time.time() - self.last_chunk_time > 0.15:
@@ -90,11 +93,16 @@ class RealtimeAudioOutputManager:
                 # Upsample the chunk to the output sample rate
                 chunk_upsampled = self.upsample_chunk_to_output_sample_rate(chunk, sample_rate)
 
+                # Respect pause requests before playing the chunk
+                self._wait_if_paused()
+                if self.stop_audio_thread:
+                    break
+
                 # Play the chunk
                 self.play_raw_audio_callback(bytes=chunk_upsampled, sample_rate=self.output_sample_rate)
 
                 # Sleep between chunks
-                time.sleep(self.sleep_time_between_chunks_seconds * self.chunk_length_seconds)
+                self._sleep_with_interrupts(self.sleep_time_between_chunks_seconds * self.chunk_length_seconds)
 
             except queue.Empty:
                 # Check if we should timeout due to no new chunks
@@ -107,7 +115,7 @@ class RealtimeAudioOutputManager:
     def upsample_chunk_to_output_sample_rate(self, chunk, sample_rate):
         # If sample rates are the same, no upsampling needed
         if sample_rate == self.output_sample_rate:
-            return chunk, sample_rate
+            return chunk
 
         # Calculate upsampling ratio
         ratio = self.output_sample_rate // sample_rate
@@ -141,3 +149,48 @@ class RealtimeAudioOutputManager:
         # Wait for thread to finish
         if self.audio_thread and self.audio_thread.is_alive():
             self.audio_thread.join()
+
+        # Clear pause state
+        with self.pause_lock:
+            self.pause_until_timestamp = 0.0
+
+    # ------------------------------------------------------------------
+    # Pause helpers
+    # ------------------------------------------------------------------
+    def pause_for(self, duration_seconds: float):
+        """Pause playback for the specified duration (in seconds)."""
+        if duration_seconds <= 0:
+            return
+
+        pause_until = time.time() + duration_seconds
+        with self.pause_lock:
+            if pause_until > self.pause_until_timestamp:
+                self.pause_until_timestamp = pause_until
+
+    def _remaining_pause_time(self) -> float:
+        with self.pause_lock:
+            remaining = self.pause_until_timestamp - time.time()
+        return max(remaining, 0.0)
+
+    def _wait_if_paused(self):
+        while not self.stop_audio_thread:
+            remaining = self._remaining_pause_time()
+            if remaining <= 0:
+                break
+            time.sleep(min(remaining, 0.05))
+
+    def _sleep_with_interrupts(self, total_seconds: float):
+        if total_seconds <= 0:
+            return
+
+        end_time = time.time() + total_seconds
+        while not self.stop_audio_thread:
+            if self._remaining_pause_time() > 0:
+                # If a pause was requested during sleep, exit early so the pause can be handled
+                break
+
+            remaining = end_time - time.time()
+            if remaining <= 0:
+                break
+
+            time.sleep(min(remaining, 0.05))

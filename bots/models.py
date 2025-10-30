@@ -975,6 +975,7 @@ class BotEventTypes(models.IntegerChoices):
 class RealtimeTriggerTypes(models.IntegerChoices):
     MIXED_AUDIO_CHUNK = 101, "Mixed audio chunk"
     BOT_OUTPUT_AUDIO_CHUNK = 102, "Bot output audio chunk"
+    PAUSE_CURRENT_LECTURE = 103, "Pause current lecture"
 
     @classmethod
     def type_to_api_code(cls, value):
@@ -982,6 +983,7 @@ class RealtimeTriggerTypes(models.IntegerChoices):
         mapping = {
             cls.MIXED_AUDIO_CHUNK: "realtime_audio.mixed",
             cls.BOT_OUTPUT_AUDIO_CHUNK: "realtime_audio.bot_output",
+            cls.PAUSE_CURRENT_LECTURE: "realtime_audio.pause_current_lecture",
         }
         return mapping.get(value)
 

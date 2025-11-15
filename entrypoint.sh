@@ -33,6 +33,8 @@ fi
 # Pulse runtime lives under XDG_RUNTIME_DIR
 export PULSE_RUNTIME_PATH="$XDG_RUNTIME_DIR/pulse"
 mkdir -p "$PULSE_RUNTIME_PATH"
+# make sure the runtime dir is owned by the current (non-root) user so Pulse can create its socket
+chown -R "$UID_CUR" "$XDG_RUNTIME_DIR" >/dev/null 2>&1 || true
 chmod 700 "$XDG_RUNTIME_DIR" || true
 
 
@@ -55,6 +57,13 @@ fi
 
 # Start our own server unless PULSE_SERVER is preset (shared server case)
 if [[ -z "${PULSE_SERVER:-}" ]]; then
+  # ensure anonymous local connections are allowed (helps pactl connect)
+  HOME_DIR="${HOME:-/home/$(id -un)}"
+  PA_CONFIG_DIR="$HOME_DIR/.config/pulse"
+  mkdir -p "$PA_CONFIG_DIR"
+  if ! grep -q "module-native-protocol-unix" "$PA_CONFIG_DIR/default.pa" 2>/dev/null; then
+    echo "load-module module-native-protocol-unix auth-anonymous=1" >> "$PA_CONFIG_DIR/default.pa"
+  fi
   rm -f "${PULSE_RUNTIME_PATH}/pid" 2>/dev/null || true
   echo "Starting PulseAudio (per-user)…"
   pulseaudio --daemonize=yes \
@@ -100,4 +109,10 @@ if [[ "${PA_DEBUG:-0}" = "1" ]]; then
 fi
 
 echo "[entrypoint] PulseAudio ready. Exec: $*"
+
+ulimit -u 65535 || true
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
+
 exec "$@"

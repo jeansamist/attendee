@@ -864,6 +864,24 @@ class WebBotAdapter(BotAdapter):
         # Call the JavaScript function to enqueue the PCM chunk
         self.driver.execute_script(f"window.botOutputManager.playPCMAudio({audio_data}, {sample_rate})")
 
+    def interrupt_current_lecture(self, duration_seconds: float, reason: str = None):
+        """
+        Interrupts the current lecture playback on the JavaScript side.
+
+        :param duration_seconds: Duration to interrupt playback in seconds
+        :param reason: Optional reason for the interruption
+        """
+        if not self.driver:
+            return
+
+        try:
+            reason_js = json.dumps(reason) if reason else "null"
+            self.driver.execute_script(
+                f"window.botOutputManager?.interruptCurrentLecture({duration_seconds}, {reason_js})"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to interrupt current lecture: {e}")
+
     def send_chat_message(self, text, to_user_uuid):
         logger.info("send_chat_message not supported in web bots")
 

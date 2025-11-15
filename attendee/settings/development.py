@@ -4,7 +4,7 @@ from .base import *
 
 DEBUG = True
 SITE_DOMAIN = "localhost:8000"
-ALLOWED_HOSTS = ["tendee-stripe-hooks.ngrok.io", "localhost"]
+ALLOWED_HOSTS = ["tendee-stripe-hooks.ngrok.io", "localhost", "attendee.heekoo.com"]
 
 DATABASES = {
     "default": {
@@ -16,6 +16,12 @@ DATABASES = {
         "PORT": "5432",
     }
 }
+
+CSRF_TRUSTED_ORIGINS = [
+    "https://attendee.heekoo.com",
+    "http://attendee.heekoo.com",
+]
+
 
 # Log more stuff in development
 LOGGING = {

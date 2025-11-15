@@ -272,7 +272,7 @@ TRANSCRIPTION_SETTINGS_SCHEMA = {
                 },
             },
             "required": [],
-            "additionalProperties": False,
+            "additionalProperties": True,
         },
         "openai": {
             "type": "object",

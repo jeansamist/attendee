@@ -755,6 +755,7 @@ class BotController:
             play_raw_audio_callback=self.adapter.send_raw_audio,
             sleep_time_between_chunks_seconds=self.get_sleep_time_between_audio_output_chunks_seconds(),
             output_sample_rate=self.mixed_audio_sample_rate(),
+            interrupt_callback=self.adapter.interrupt_current_lecture if hasattr(self.adapter, 'interrupt_current_lecture') else None,
         )
 
         self.video_output_manager = VideoOutputManager(

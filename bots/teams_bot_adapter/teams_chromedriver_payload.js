@@ -2532,6 +2532,13 @@ class BotOutputManager {
         this.sampleRate = 44100; // Default sample rate
         this.numChannels = 1;    // Default channels
         this.turnOffMicTimeout = null;
+        
+        // Interrupt state for pausing audio playback
+        this.interruptUntil = 0.0;
+        this.interruptResumeTimeout = null;
+        
+        // Active audio sources that are currently playing (to stop them on interrupt)
+        this.activeAudioSources = [];
     }
 
     playPCMAudio(pcmData, sampleRate = 44100, numChannels = 1) {
@@ -2574,6 +2581,57 @@ class BotOutputManager {
         }
     }
     
+    interruptCurrentLecture(durationSeconds, reason = null) {
+        if (durationSeconds <= 0) {
+            return;
+        }
+
+        const now = performance.now() / 1000.0; // Convert to seconds
+        const newInterruptUntil = now + durationSeconds;
+        
+        // Stop all currently playing audio sources immediately
+        if (this.activeAudioSources.length > 0) {
+            realConsole?.log(`Stopping ${this.activeAudioSources.length} active audio source(s) immediately`);
+            // Stop all active sources
+            for (const source of this.activeAudioSources) {
+                try {
+                    source.stop();
+                } catch (e) {
+                    // Source might already be stopped, ignore error
+                }
+            }
+            // Clear the array
+            this.activeAudioSources = [];
+        }
+        
+        // Set isPlaying to false since we stopped all sources
+        this.isPlaying = false;
+        
+        // Only extend interruption if the new time is later
+        if (newInterruptUntil > this.interruptUntil) {
+            this.interruptUntil = newInterruptUntil;
+            
+            // Clear any existing resume timeout
+            if (this.interruptResumeTimeout) {
+                clearTimeout(this.interruptResumeTimeout);
+            }
+            
+            // Schedule resumption
+            const resumeDelayMs = durationSeconds * 1000;
+            this.interruptResumeTimeout = setTimeout(() => {
+                this.interruptUntil = 0.0;
+                this.interruptResumeTimeout = null;
+                
+                // Resume processing audio queue if there are chunks queued
+                if (this.audioQueue.length > 0 && !this.isPlaying) {
+                    this.processAudioQueue();
+                }
+            }, resumeDelayMs);
+            
+            realConsole?.log(`Interrupting lecture for ${durationSeconds}s${reason ? ` (${reason})` : ''}`);
+        }
+    }
+
     processAudioQueue() {
         if (this.audioQueue.length === 0) {
             this.isPlaying = false;
@@ -2591,6 +2649,20 @@ class BotOutputManager {
             }, 2000);
             
             return;
+        }
+        
+        // Check if we're currently interrupted
+        const now = performance.now() / 1000.0; // Convert to seconds
+        if (this.interruptUntil > now) {
+            // We're interrupted, check again soon
+            const remainingMs = (this.interruptUntil - now) * 1000;
+            setTimeout(() => this.processAudioQueue(), Math.min(remainingMs, 50));
+            return;
+        }
+        
+        // Interruption has ended, clear it
+        if (this.interruptUntil > 0.0) {
+            this.interruptUntil = 0.0;
         }
         
         this.isPlaying = true;
@@ -2626,6 +2698,18 @@ class BotOutputManager {
         const source = this.audioContextForBotOutput.createBufferSource();
         source.buffer = audioBuffer;
         source.connect(this.gainNode);
+        
+        // Add to active sources list so we can stop it on interrupt
+        this.activeAudioSources.push(source);
+        
+        // Clean up source when it ends (whether naturally or stopped)
+        source.onended = () => {
+            // Remove from active sources
+            const index = this.activeAudioSources.indexOf(source);
+            if (index > -1) {
+                this.activeAudioSources.splice(index, 1);
+            }
+        };
         
         // Schedule precisely
         source.start(this.nextPlayTime);

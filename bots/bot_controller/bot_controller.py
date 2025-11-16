@@ -83,7 +83,7 @@ logger = logging.getLogger(__name__)
 class BotController:
     # Default wait time for utterance termination (5 minutes)
     UTTERANCE_TERMINATION_WAIT_TIME_SECONDS = 300
-    REALTIME_AUDIO_INTERRUPT_THRESHOLD = 0.01
+    REALTIME_AUDIO_INTERRUPT_THRESHOLD = 0.1
     REALTIME_AUDIO_INTERRUPT_DURATION_SECONDS = 0.8
 
     def per_participant_audio_input_manager(self):

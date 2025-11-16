@@ -393,6 +393,11 @@ class BotOutputManager {
         this.sampleRate = 44100;
         this.numChannels = 1;
         this.turnOffMicTimeout = null;
+        
+        // ---- INTERRUPTION STATE ----
+        this.activeAudioSources = []; // Track all active AudioBufferSourceNode instances
+        this.interruptUntil = 0; // Timestamp (in audioContext.currentTime) when interruption ends
+        this.interruptTimeout = null; // Timeout for resuming playback after interruption
 
         this._originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(
             navigator.mediaDevices
@@ -608,9 +613,18 @@ class BotOutputManager {
             return;
         }
     
+        // Check if we're currently interrupted - if so, don't play but schedule a check
+        const currentTime = this.audioContext.currentTime;
+        if (this.interruptUntil > currentTime) {
+            // Still interrupted - schedule a check for when interruption ends
+            const remainingInterruptTime = this.interruptUntil - currentTime;
+            const checkTimeMs = Math.max(10, remainingInterruptTime * 1000);
+            setTimeout(() => this._processAudioQueue(), checkTimeMs);
+            return;
+        }
+    
         this.isPlayingAudioQueue = true;
     
-        const currentTime = this.audioContext.currentTime;
         if (!this.nextPlayTime || this.nextPlayTime < currentTime) {
             // Catch up if we've fallen behind
             this.nextPlayTime = currentTime;
@@ -640,6 +654,17 @@ class BotOutputManager {
         const source = this.audioContext.createBufferSource();
         source.buffer = audioBuffer;
         source.connect(this.gainNode); // -> gain node -> mic track
+        
+        // Track this source so we can stop it instantly if interrupted
+        this.activeAudioSources.push(source);
+        
+        // Remove source from tracking when it ends naturally
+        source.onended = () => {
+            const index = this.activeAudioSources.indexOf(source);
+            if (index > -1) {
+                this.activeAudioSources.splice(index, 1);
+            }
+        };
     
         source.start(this.nextPlayTime);
         this.nextPlayTime += duration;
@@ -652,6 +677,65 @@ class BotOutputManager {
             () => this._processAudioQueue(),
             Math.max(0, timeUntilNextProcessMs)
         );
+    }
+    
+    /**
+     * Interrupts the current lecture playback instantly.
+     * Stops all active audio sources immediately and prevents new chunks from playing
+     * until the interruption duration expires.
+     * 
+     * @param {number} durationSeconds - Duration to interrupt playback in seconds
+     * @param {string|null} reason - Optional reason for the interruption (for logging)
+     */
+    interruptCurrentLecture(durationSeconds, reason = null) {
+        if (!this.audioContext) {
+            return;
+        }
+        
+        const currentTime = this.audioContext.currentTime;
+        const interruptUntil = currentTime + durationSeconds;
+        
+        // Update interruption end time (extend if new interruption is longer)
+        if (interruptUntil > this.interruptUntil) {
+            this.interruptUntil = interruptUntil;
+        }
+        
+        // Stop ALL active audio sources immediately
+        // This ensures instant silence, even if a chunk is currently playing
+        for (let i = this.activeAudioSources.length - 1; i >= 0; i--) {
+            const source = this.activeAudioSources[i];
+            try {
+                source.stop(); // Stop immediately
+            } catch (e) {
+                // Source may have already ended, ignore error
+            }
+            this.activeAudioSources.splice(i, 1);
+        }
+        
+        // Clear any pending interrupt timeout and set a new one
+        if (this.interruptTimeout) {
+            clearTimeout(this.interruptTimeout);
+        }
+        
+        // Schedule resumption of playback after interruption expires
+        this.interruptTimeout = setTimeout(() => {
+            this.interruptUntil = 0;
+            this.interruptTimeout = null;
+            
+            // Reset nextPlayTime to current time so we resume from now, not try to catch up
+            if (this.audioContext) {
+                this.nextPlayTime = this.audioContext.currentTime;
+            }
+            
+            // Resume processing the queue if there are chunks waiting
+            if (this.audioQueue.length > 0 && !this.isPlayingAudioQueue) {
+                this._processAudioQueue();
+            }
+        }, durationSeconds * 1000);
+        
+        if (reason) {
+            console.log(`Audio interrupted for ${durationSeconds}s: ${reason}`);
+        }
     }
 
     getAudioContextDestination() {

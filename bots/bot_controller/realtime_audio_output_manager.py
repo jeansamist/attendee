@@ -29,8 +29,9 @@ def _upsample(chunk: bytes, src_rate: int, dst_rate: int) -> bytes:
 
 
 class RealtimeAudioOutputManager:
-    def __init__(self, play_raw_audio_callback, sleep_time_between_chunks_seconds, output_sample_rate):
+    def __init__(self, play_raw_audio_callback, sleep_time_between_chunks_seconds, output_sample_rate, interrupt_callback=None):
         self.play_raw_audio_callback = play_raw_audio_callback
+        self.interrupt_callback = interrupt_callback
         self.sleep_time_between_chunks_seconds = sleep_time_between_chunks_seconds
 
         self.audio_queue = queue.Queue()
@@ -128,6 +129,13 @@ class RealtimeAudioOutputManager:
             logger.info(message)
         else:
             logger.debug(message)
+
+        # Notify JavaScript side to interrupt audio playback
+        if self.interrupt_callback:
+            try:
+                self.interrupt_callback(duration_seconds=duration_seconds, reason=reason)
+            except Exception as e:
+                logger.warning(f"Failed to call interrupt callback: {e}")
 
     def _wait_if_interrupted(self):
         while not self.stop_audio_thread:

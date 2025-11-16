@@ -288,6 +288,22 @@ class BotController:
         if self.gstreamer_pipeline:
             self.gstreamer_pipeline.on_mixed_audio_raw_data_received_callback(chunk)
 
+        # Check audio level and pause realtime audio output if needed
+        if self.realtime_audio_output_manager:
+            try:
+                # Determine sample width based on audio format
+                # Float audio = 4 bytes per sample (32-bit), PCM audio = 2 bytes per sample (16-bit)
+                audio_format = self.get_audio_format()
+                sample_width = 4 if "F32LE" in audio_format else 2
+                self.realtime_audio_output_manager.check_audio_level_and_pause_if_needed(chunk, sample_width)
+            except Exception as e:
+                # Don't crash if audio level check fails
+                if not hasattr(self, 'audio_level_check_callback_error_count'):
+                    self.audio_level_check_callback_error_count = 0
+                self.audio_level_check_callback_error_count += 1
+                if self.audio_level_check_callback_error_count % 100 == 1:
+                    logger.error(f"Error in audio level check callback (error #{self.audio_level_check_callback_error_count}): {e}")
+
         if not self.websocket_audio_client:
             return
 
@@ -760,6 +776,11 @@ class BotController:
             sleep_time_between_chunks_seconds=self.get_sleep_time_between_audio_output_chunks_seconds(),
             output_sample_rate=self.mixed_audio_sample_rate(),
         )
+
+        # Set audio threshold if configured
+        audio_threshold = self.bot_in_db.websocket_audio_threshold()
+        if audio_threshold is not None:
+            self.realtime_audio_output_manager.set_audio_threshold(audio_threshold)
 
         self.video_output_manager = VideoOutputManager(
             currently_playing_video_media_request_finished_callback=self.currently_playing_video_media_request_finished,
@@ -1386,7 +1407,20 @@ class BotController:
             if message["trigger"] == RealtimeTriggerTypes.type_to_api_code(RealtimeTriggerTypes.BOT_OUTPUT_AUDIO_CHUNK):
                 chunk = b64decode(message["data"]["chunk"])
                 sample_rate = message["data"]["sample_rate"]
-                self.realtime_audio_output_manager.add_chunk(chunk, sample_rate)
+                if self.realtime_audio_output_manager:
+                    self.realtime_audio_output_manager.add_chunk(chunk, sample_rate)
+                else:
+                    logger.warning("Received bot_output_audio_chunk event but realtime_audio_output_manager is not available")
+            elif message["trigger"] == RealtimeTriggerTypes.type_to_api_code(RealtimeTriggerTypes.PAUSE_CURRENT_LECTURE):
+                duration_ms = message["data"].get("duration", 0)
+                if duration_ms > 0:
+                    logger.info(f"Received pause_current_lecture event with duration {duration_ms}ms")
+                    if self.realtime_audio_output_manager:
+                        self.realtime_audio_output_manager.pause_playback(duration_ms=duration_ms)
+                    else:
+                        logger.warning("Received pause_current_lecture event but realtime_audio_output_manager is not available")
+                else:
+                    logger.warning(f"Received pause_current_lecture event with invalid duration: {duration_ms}")
             else:
                 if not hasattr(self, "websocket_audio_error_ticker"):
                     self.websocket_audio_error_ticker = 0

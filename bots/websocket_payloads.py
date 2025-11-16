@@ -47,3 +47,13 @@ def mixed_audio_websocket_payload(chunk: bytes, input_sample_rate: int, output_s
             "sample_rate": output_sample_rate,
         },
     }
+
+
+def pause_current_lecture_websocket_payload(*, duration_ms: int, bot_object_id: str) -> dict:
+    """Request the remote voice agent to pause sending audio for the requested duration."""
+
+    return {
+        "trigger": RealtimeTriggerTypes.type_to_api_code(RealtimeTriggerTypes.PAUSE_CURRENT_LECTURE),
+        "bot_id": bot_object_id,
+        "data": {"duration": int(duration_ms)},
+    }

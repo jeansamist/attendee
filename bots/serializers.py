@@ -829,6 +829,12 @@ class BotChatMessageRequestSerializer(serializers.Serializer):
                         "default": 16000,
                         "description": "The sample rate of the audio to send. Can be 8000, 16000, or 24000. Defaults to 16000.",
                     },
+                    "pause_threshold": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 32767,
+                        "description": "Optional RMS amplitude threshold for meeting audio (0-32767). When the mixed audio RMS meets or exceeds this value, the bot pauses outgoing realtime audio playback for 800ms.",
+                    },
                 },
                 "required": ["url"],
                 "additionalProperties": False,
@@ -1165,6 +1171,11 @@ class CreateBotSerializer(BotValidationMixin, serializers.Serializer):
                         "type": "integer",
                         "enum": [8000, 16000, 24000],
                     },
+                    "pause_threshold": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 32767,
+                    },
                 },
                 "required": ["url"],
                 "additionalProperties": False,
@@ -1194,6 +1205,10 @@ class CreateBotSerializer(BotValidationMixin, serializers.Serializer):
             if audio_url:
                 if not audio_url.lower().startswith("wss://"):
                     raise serializers.ValidationError({"audio": {"url": "URL must start with wss://"}})
+
+            pause_threshold = value.get("audio", {}).get("pause_threshold")
+            if pause_threshold is not None:
+                value["audio"]["pause_threshold"] = float(pause_threshold)
 
         return value
 

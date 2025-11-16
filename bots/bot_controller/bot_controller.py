@@ -18,6 +18,7 @@ from django.utils import timezone
 from bots.automatic_leave_configuration import AutomaticLeaveConfiguration
 from bots.bot_adapter import BotAdapter
 from bots.bot_controller.bot_websocket_client import BotWebsocketClient
+from bots.bot_sso_utils import create_google_meet_sign_in_session
 from bots.bots_api_utils import BotCreationSource
 from bots.external_callback_utils import get_zoom_tokens
 from bots.meeting_url_utils import meeting_type_from_url
@@ -37,9 +38,12 @@ from bots.models import (
     ChatMessage,
     ChatMessageToOptions,
     Credentials,
+    GoogleMeetBotLogin,
+    GoogleMeetBotLoginGroup,
     MeetingTypes,
     Participant,
     ParticipantEvent,
+    ParticipantEventTypes,
     RealtimeTriggerTypes,
     Recording,
     RecordingFormats,
@@ -68,6 +72,7 @@ from .rtmp_client import RTMPClient
 from .s3_file_uploader import S3FileUploader
 from .screen_and_audio_recorder import ScreenAndAudioRecorder
 from .video_output_manager import VideoOutputManager
+from .webpage_streamer_manager import WebpageStreamerManager
 
 gi.require_version("GLib", "2.0")
 from gi.repository import GLib
@@ -99,6 +104,26 @@ class BotController:
     def disable_incoming_video_for_web_bots(self):
         return not (self.pipeline_configuration.record_video or self.pipeline_configuration.rtmp_stream_video)
 
+    def create_google_meet_bot_login_session(self):
+        if not self.bot_in_db.google_meet_use_bot_login():
+            return None
+        first_google_meet_bot_login_group = GoogleMeetBotLoginGroup.objects.filter(project=self.bot_in_db.project).first()
+        if not first_google_meet_bot_login_group:
+            return None
+        least_used_google_meet_bot_login = first_google_meet_bot_login_group.google_meet_bot_logins.order_by("last_used_at").first()
+        if not least_used_google_meet_bot_login:
+            return None
+        least_used_google_meet_bot_login.last_used_at = timezone.now()
+        least_used_google_meet_bot_login.save()
+        session_id = create_google_meet_sign_in_session(self.bot_in_db, least_used_google_meet_bot_login)
+        return {
+            "session_id": session_id,
+            "login_email": least_used_google_meet_bot_login.email,
+        }
+
+    def google_meet_bot_login_is_available(self):
+        return self.bot_in_db.google_meet_use_bot_login() and GoogleMeetBotLogin.objects.filter(group__project=self.bot_in_db.project).exists()
+
     def get_google_meet_bot_adapter(self):
         from bots.google_meet_bot_adapter import GoogleMeetBotAdapter
 
@@ -112,8 +137,6 @@ class BotController:
             send_message_callback=self.on_message_from_adapter,
             add_audio_chunk_callback=add_audio_chunk_callback,
             meeting_url=self.bot_in_db.meeting_url,
-            voice_agent_url=self.bot_in_db.voice_agent_url(),
-            webpage_streamer_service_hostname=self.bot_in_db.k8s_webpage_streamer_service_hostname(),
             add_video_frame_callback=None,
             wants_any_video_frames_callback=None,
             add_mixed_audio_chunk_callback=self.add_mixed_audio_chunk_callback if self.pipeline_configuration.websocket_stream_audio else None,
@@ -130,6 +153,9 @@ class BotController:
             video_frame_size=self.bot_in_db.recording_dimensions(),
             record_chat_messages_when_paused=self.bot_in_db.record_chat_messages_when_paused(),
             disable_incoming_video=self.disable_incoming_video_for_web_bots(),
+            google_meet_bot_login_is_available=self.google_meet_bot_login_is_available(),
+            google_meet_bot_login_should_be_used=self.bot_in_db.google_meet_login_mode_is_always(),
+            create_google_meet_bot_login_session_callback=self.create_google_meet_bot_login_session,
         )
 
     def get_teams_bot_adapter(self):
@@ -147,8 +173,6 @@ class BotController:
             send_message_callback=self.on_message_from_adapter,
             add_audio_chunk_callback=add_audio_chunk_callback,
             meeting_url=self.bot_in_db.meeting_url,
-            voice_agent_url=self.bot_in_db.voice_agent_url(),
-            webpage_streamer_service_hostname=self.bot_in_db.k8s_webpage_streamer_service_hostname(),
             add_video_frame_callback=None,
             wants_any_video_frames_callback=None,
             add_mixed_audio_chunk_callback=self.add_mixed_audio_chunk_callback if self.pipeline_configuration.websocket_stream_audio else None,
@@ -212,8 +236,6 @@ class BotController:
             send_message_callback=self.on_message_from_adapter,
             add_audio_chunk_callback=add_audio_chunk_callback,
             meeting_url=self.bot_in_db.meeting_url,
-            voice_agent_url=self.bot_in_db.voice_agent_url(),
-            webpage_streamer_service_hostname=self.bot_in_db.k8s_webpage_streamer_service_hostname(),
             add_video_frame_callback=None,
             wants_any_video_frames_callback=None,
             add_mixed_audio_chunk_callback=self.add_mixed_audio_chunk_callback if self.pipeline_configuration.websocket_stream_audio else None,
@@ -514,6 +536,10 @@ class BotController:
             logger.info("Telling realtime audio output manager to cleanup...")
             self.realtime_audio_output_manager.cleanup()
 
+        if self.webpage_streamer_manager:
+            logger.info("Telling webpage streamer manager to cleanup...")
+            self.webpage_streamer_manager.cleanup()
+
         if self.websocket_audio_client:
             logger.info("Telling websocket audio client to cleanup...")
             self.websocket_audio_client.cleanup()
@@ -617,7 +643,13 @@ class BotController:
         elif not self.pipeline_configuration.record_audio and not self.pipeline_configuration.record_video:
             return None
         else:
-            return os.path.join("/tmp", self.get_recording_filename())
+            return os.path.join(self.get_recording_storage_directory(), self.get_recording_filename())
+
+    def get_recording_storage_directory(self):
+        if self.bot_in_db.reserve_additional_storage():
+            return "/bot-persistent-storage"
+        else:
+            return "/tmp"
 
     def should_create_gstreamer_pipeline(self):
         # if we're not recording audio or video and not doing rtmp streaming, then we don't need to create a gstreamer pipeline
@@ -690,6 +722,7 @@ class BotController:
             sample_rate=self.get_per_participant_audio_sample_rate(),
             utterance_size_limit=self.non_streaming_audio_utterance_size_limit(),
             silence_duration_limit=self.non_streaming_audio_silence_duration_limit(),
+            should_print_diagnostic_info=self.should_capture_audio_chunks(),
         )
 
         self.per_participant_streaming_audio_input_manager = PerParticipantStreamingAudioInputManager(
@@ -763,6 +796,16 @@ class BotController:
             check_if_currently_playing_video_media_request_is_still_playing_callback=self.adapter.is_sent_video_still_playing,
             play_video_callback=self.adapter.send_video,
         )
+
+        self.webpage_streamer_manager = None
+        if self.bot_in_db.should_launch_webpage_streamer():
+            self.webpage_streamer_manager = WebpageStreamerManager(
+                get_peer_connection_offer_callback=self.adapter.webpage_streamer_get_peer_connection_offer,
+                start_peer_connection_callback=self.adapter.webpage_streamer_start_peer_connection,
+                play_bot_output_media_stream_callback=self.adapter.webpage_streamer_play_bot_output_media_stream,
+                stop_bot_output_media_stream_callback=self.adapter.webpage_streamer_stop_bot_output_media_stream,
+                webpage_streamer_service_hostname=self.bot_in_db.k8s_webpage_streamer_service_hostname(),
+            )
 
         self.bot_resource_snapshot_taker = BotResourceSnapshotTaker(self.bot_in_db)
 
@@ -928,6 +971,12 @@ class BotController:
             self.adapter.send_chat_message(text=chat_message_request.message, to_user_uuid=chat_message_request.to_user_uuid)
             BotChatMessageRequestManager.set_chat_message_request_sent(chat_message_request)
 
+    def take_action_based_on_voice_agent_settings_in_db(self):
+        if self.bot_in_db.should_launch_webpage_streamer():
+            self.webpage_streamer_manager.update(url=self.bot_in_db.voice_agent_url(), output_destination=self.bot_in_db.voice_agent_video_output_destination())
+        else:
+            logger.info("Bot should not launch webpage streamer, so not starting webpage streamer manager")
+
     def take_action_based_on_media_requests_in_db(self):
         self.take_action_based_on_audio_media_requests_in_db()
         self.take_action_based_on_image_media_requests_in_db()
@@ -976,6 +1025,10 @@ class BotController:
                 logger.info(f"Syncing media requests for bot {self.bot_in_db.object_id}")
                 self.bot_in_db.refresh_from_db()
                 self.take_action_based_on_media_requests_in_db()
+            elif command == "sync_voice_agent_settings":
+                logger.info(f"Syncing voice agent settings for bot {self.bot_in_db.object_id}")
+                self.bot_in_db.refresh_from_db()
+                self.take_action_based_on_voice_agent_settings_in_db()
             elif command == "sync_transcription_settings":
                 logger.info(f"Syncing transcription settings for bot {self.bot_in_db.object_id}")
                 self.bot_in_db.refresh_from_db()
@@ -996,6 +1049,10 @@ class BotController:
                 logger.info(f"Admitting from waiting room for bot {self.bot_in_db.object_id}")
                 self.bot_in_db.refresh_from_db()
                 self.admit_from_waiting_room()
+            elif command == "change_gallery_view_page_next" or command == "change_gallery_view_page_previous":
+                logger.info(f"Changing gallery view page for bot {self.bot_in_db.object_id}. Command: {command}")
+                self.bot_in_db.refresh_from_db()
+                self.change_gallery_view_page(next_page=(command == "change_gallery_view_page_next"))
             else:
                 logger.info(f"Unknown command: {command}")
 
@@ -1004,6 +1061,12 @@ class BotController:
             logger.info(f"Bot {self.bot_in_db.object_id} is in state {BotStates.state_to_api_code(self.bot_in_db.state)} and cannot admit from waiting room")
             return
         self.adapter.admit_from_waiting_room()
+
+    def change_gallery_view_page(self, next_page: bool):
+        if not BotEventManager.is_state_that_can_change_gallery_view_page(self.bot_in_db.state):
+            logger.info(f"Bot {self.bot_in_db.object_id} is in state {BotStates.state_to_api_code(self.bot_in_db.state)} and cannot change gallery view pagination")
+            return
+        self.adapter.change_gallery_view_page(next_page)
 
     def pause_recording_for_pipeline_objects(self):
         pause_recording_success = self.screen_and_audio_recorder.pause_recording() if self.screen_and_audio_recorder else True
@@ -1243,6 +1306,14 @@ class BotController:
             },
         )
 
+        if event["event_type"] == ParticipantEventTypes.UPDATE:
+            if "isHost" in event["event_data"]:
+                participant.is_host = event["event_data"]["isHost"]["after"]
+                participant.save()
+                logger.info(f"Updated participant {participant.object_id} is host to {participant.is_host}")
+            # Don't save this event type in the database for now.
+            return
+
         participant_event = ParticipantEvent.objects.create(
             participant=participant,
             event_type=event["event_type"],
@@ -1252,6 +1323,10 @@ class BotController:
 
         # Don't send webhook for the bot itself
         if participant.is_the_bot:
+            return
+
+        # Don't send webhook for non join / leave events
+        if participant_event.event_type != ParticipantEventTypes.JOIN and participant_event.event_type != ParticipantEventTypes.LEAVE:
             return
 
         trigger_webhook(
@@ -1384,6 +1459,35 @@ class BotController:
                 logger.error(f"Error processing message from websocket: {e}")
             self.websocket_audio_error_ticker += 1
 
+    def save_debug_artifacts(self, message, new_bot_event):
+        screenshot_available = message.get("screenshot_path") is not None
+        mhtml_file_available = message.get("mhtml_file_path") is not None
+
+        if screenshot_available:
+            # Create debug screenshot
+            debug_screenshot = BotDebugScreenshot.objects.create(bot_event=new_bot_event)
+
+            # Read the file content from the path
+            with open(message.get("screenshot_path"), "rb") as f:
+                screenshot_content = f.read()
+                debug_screenshot.file.save(
+                    f"debug_screenshot_{debug_screenshot.object_id}.png",
+                    ContentFile(screenshot_content),
+                    save=True,
+                )
+
+        if mhtml_file_available:
+            # Create debug screenshot
+            mhtml_debug_screenshot = BotDebugScreenshot.objects.create(bot_event=new_bot_event)
+
+            with open(message.get("mhtml_file_path"), "rb") as f:
+                mhtml_content = f.read()
+                mhtml_debug_screenshot.file.save(
+                    f"debug_screenshot_{mhtml_debug_screenshot.object_id}.mhtml",
+                    ContentFile(mhtml_content),
+                    save=True,
+                )
+
     def take_action_based_on_message_from_adapter(self, message):
         if message.get("message") == BotAdapter.Messages.JOINING_BREAKOUT_ROOM:
             logger.info("Received message that bot is joining breakout room")
@@ -1437,11 +1541,14 @@ class BotController:
 
         if message.get("message") == BotAdapter.Messages.LOGIN_ATTEMPT_FAILED:
             logger.info("Received message that login attempt failed")
-            BotEventManager.create_event(
+            new_bot_event = BotEventManager.create_event(
                 bot=self.bot_in_db,
                 event_type=BotEventTypes.COULD_NOT_JOIN,
                 event_sub_type=BotEventSubTypes.COULD_NOT_JOIN_MEETING_BOT_LOGIN_ATTEMPT_FAILED,
             )
+
+            self.save_debug_artifacts(message, new_bot_event)
+
             self.cleanup()
             return
 
@@ -1639,6 +1746,13 @@ class BotController:
             # If there are any image media requests, this will start playing them
             # For now the only type of media request is an image, so this will start showing the bot's image
             self.take_action_based_on_image_media_requests_in_db()
+            return
+
+        if message.get("message") == BotAdapter.Messages.READY_TO_SHOW_WEBPAGE_STREAM:
+            logger.info("Received message that bot is ready to show webpage stream")
+            # If there are any webpage stream media requests, this will start playing them
+            # For now the only type of media request is a webpage stream, so this will start showing the bot's webpage stream
+            self.take_action_based_on_voice_agent_settings_in_db()
             return
 
         if message.get("message") == BotAdapter.Messages.BOT_RECORDING_PERMISSION_GRANTED:

@@ -9,6 +9,7 @@ from base64 import b64decode
 from datetime import timedelta
 
 import gi
+import numpy as np
 import redis
 from django.conf import settings
 from django.core.files.base import ContentFile
@@ -82,6 +83,8 @@ logger = logging.getLogger(__name__)
 class BotController:
     # Default wait time for utterance termination (5 minutes)
     UTTERANCE_TERMINATION_WAIT_TIME_SECONDS = 300
+    REALTIME_AUDIO_INTERRUPT_THRESHOLD = 0.01
+    REALTIME_AUDIO_INTERRUPT_DURATION_SECONDS = 0.8
 
     def per_participant_audio_input_manager(self):
         if self.bot_in_db.transcription_settings.deepgram_use_streaming():
@@ -288,6 +291,9 @@ class BotController:
         if self.gstreamer_pipeline:
             self.gstreamer_pipeline.on_mixed_audio_raw_data_received_callback(chunk)
 
+        if self.realtime_audio_output_manager:
+            self._maybe_interrupt_realtime_audio_due_to_mixed_chunk(chunk)
+
         if not self.websocket_audio_client:
             return
 
@@ -303,6 +309,29 @@ class BotController:
         )
 
         self.websocket_audio_client.send_async(payload)
+
+    @staticmethod
+    def _calculate_normalized_rms(chunk: bytes) -> float:
+        if not chunk:
+            return 0.0
+
+        samples = np.frombuffer(chunk, dtype=np.int16)
+        if samples.size == 0:
+            return 0.0
+
+        samples = samples.astype(np.float32)
+        rms = np.sqrt(np.mean(np.square(samples)))
+        return float(rms / 32768.0)
+
+    def _maybe_interrupt_realtime_audio_due_to_mixed_chunk(self, chunk: bytes):
+        audio_level = self._calculate_normalized_rms(chunk)
+        if audio_level < self.REALTIME_AUDIO_INTERRUPT_THRESHOLD:
+            return
+
+        self.realtime_audio_output_manager.interrupt_for(
+            self.REALTIME_AUDIO_INTERRUPT_DURATION_SECONDS,
+            reason="call_audio_threshold",
+        )
 
     def get_meeting_type(self):
         meeting_type = meeting_type_from_url(self.bot_in_db.meeting_url)
@@ -1383,10 +1412,36 @@ class BotController:
     def on_message_from_websocket_audio(self, message_json: str):
         try:
             message = json.loads(message_json)
-            if message["trigger"] == RealtimeTriggerTypes.type_to_api_code(RealtimeTriggerTypes.BOT_OUTPUT_AUDIO_CHUNK):
+            trigger = message.get("trigger")
+
+            if trigger == RealtimeTriggerTypes.type_to_api_code(RealtimeTriggerTypes.BOT_OUTPUT_AUDIO_CHUNK):
                 chunk = b64decode(message["data"]["chunk"])
                 sample_rate = message["data"]["sample_rate"]
                 self.realtime_audio_output_manager.add_chunk(chunk, sample_rate)
+            elif trigger == RealtimeTriggerTypes.type_to_api_code(RealtimeTriggerTypes.INTERRUPT_CURRENT_LECTURE):
+                if not self.realtime_audio_output_manager:
+                    return
+
+                data = message.get("data") or {}
+
+                duration_seconds = self.REALTIME_AUDIO_INTERRUPT_DURATION_SECONDS
+
+                if "duration" in data:
+                    try:
+                        duration_seconds = float(data["duration"])
+                    except (TypeError, ValueError):
+                        logger.warning("Invalid duration value in interrupt_current_lecture event: %s", data["duration"])
+
+                if "duration_ms" in data and duration_seconds == self.REALTIME_AUDIO_INTERRUPT_DURATION_SECONDS:
+                    try:
+                        duration_seconds = float(data["duration_ms"]) / 1000.0
+                    except (TypeError, ValueError):
+                        logger.warning("Invalid duration_ms value in interrupt_current_lecture event: %s", data["duration_ms"])
+
+                duration_seconds = max(0.0, duration_seconds)
+
+                reason = data.get("reason", "websocket_interrupt_event")
+                self.realtime_audio_output_manager.interrupt_for(duration_seconds, reason=reason)
             else:
                 if not hasattr(self, "websocket_audio_error_ticker"):
                     self.websocket_audio_error_ticker = 0

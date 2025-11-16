@@ -45,6 +45,9 @@ class RealtimeAudioOutputManager:
         self.inner_chunk_buffer = b""
         self.last_chunk_time = time.time()
 
+        self.interrupt_lock = threading.Lock()
+        self.interrupt_until = 0.0
+
     def add_chunk(self, chunk, sample_rate):
         # If it's been a while since we had a chunk, there's probably some "residue" in the buffer. Clear it.
         if time.time() - self.last_chunk_time > 0.15:
@@ -87,6 +90,10 @@ class RealtimeAudioOutputManager:
                 # Wait for audio chunk with timeout
                 chunk, sample_rate = self.audio_queue.get(timeout=1.0)
 
+                self._wait_if_interrupted()
+                if self.stop_audio_thread:
+                    break
+
                 # Upsample the chunk to the output sample rate
                 chunk_upsampled = self.upsample_chunk_to_output_sample_rate(chunk, sample_rate)
 
@@ -103,6 +110,42 @@ class RealtimeAudioOutputManager:
                 continue
 
         logger.info("RealtimeAudioOutputManager: Audio thread exited")
+
+    def interrupt_for(self, duration_seconds: float, reason: str = None):
+        if duration_seconds <= 0:
+            return
+
+        now = time.time()
+        with self.interrupt_lock:
+            new_interrupt_until = now + duration_seconds
+            if new_interrupt_until > self.interrupt_until:
+                self.interrupt_until = new_interrupt_until
+        message = "RealtimeAudioOutputManager: interrupt scheduled for %.3fs" % duration_seconds
+        if reason:
+            message = f"{message} due to {reason}"
+
+        if reason and reason != "call_audio_threshold":
+            logger.info(message)
+        else:
+            logger.debug(message)
+
+    def _wait_if_interrupted(self):
+        while not self.stop_audio_thread:
+            with self.interrupt_lock:
+                interrupt_until = self.interrupt_until
+
+            if interrupt_until == 0.0:
+                return
+
+            now = time.time()
+            remaining = interrupt_until - now
+            if remaining <= 0:
+                with self.interrupt_lock:
+                    if self.interrupt_until <= time.time():
+                        self.interrupt_until = 0.0
+                return
+
+            time.sleep(min(remaining, 0.05))
 
     def upsample_chunk_to_output_sample_rate(self, chunk, sample_rate):
         # If sample rates are the same, no upsampling needed
@@ -130,6 +173,8 @@ class RealtimeAudioOutputManager:
     def cleanup(self):
         """Stop the audio output thread and clear the queue."""
         self.stop_audio_thread = True
+        with self.interrupt_lock:
+            self.interrupt_until = 0.0
 
         # Clear the queue
         while not self.audio_queue.empty():

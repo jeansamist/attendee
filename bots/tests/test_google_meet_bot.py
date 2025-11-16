@@ -2,6 +2,7 @@ import datetime
 import json
 import os
 import threading
+import types
 import time
 from base64 import b64encode
 from unittest.mock import MagicMock, call, patch
@@ -156,6 +157,19 @@ class TestGoogleMeetBot(TransactionTestCase):
 
         # Create bot controller
         controller = BotController(self.bot.id)
+
+        interrupt_calls = []
+
+        original_interrupt_for = controller.realtime_audio_output_manager.interrupt_for
+
+        def interrupt_for_proxy(duration, reason=None):
+            interrupt_calls.append({"duration": duration, "reason": reason})
+            return original_interrupt_for(duration, reason=reason)
+
+        controller.realtime_audio_output_manager.interrupt_for = types.MethodType(
+            interrupt_for_proxy,
+            controller.realtime_audio_output_manager,
+        )
 
         # Run the bot in a separate thread since it has an event loop
         bot_thread = threading.Thread(target=controller.run)
@@ -942,6 +956,15 @@ class TestGoogleMeetBot(TransactionTestCase):
             # Allow time for audio processing and the realtime audio output manager to process
             time.sleep(3)
 
+            interrupt_message = {
+                "trigger": "realtime_audio.interrupt_current_lecture",
+                "data": {
+                    "duration_ms": 500,
+                    "reason": "test_interrupt",
+                },
+            }
+            controller.on_message_from_websocket_audio(json.dumps(interrupt_message))
+
             # Test invalid message handling
             invalid_message = {"trigger": "unknown_trigger", "data": {}}
             controller.on_message_from_websocket_audio(json.dumps(invalid_message))
@@ -1006,6 +1029,13 @@ class TestGoogleMeetBot(TransactionTestCase):
         self.assertIn("sample_rate", audio_call, "send_raw_audio should be called with sample_rate parameter")
         self.assertGreater(len(audio_call["bytes"]), 0, "Audio bytes should not be empty")
         self.assertGreater(audio_call["sample_rate"], 0, "Sample rate should be positive")
+
+        call_audio_interrupts = [call_details for call_details in interrupt_calls if call_details["reason"] == "call_audio_threshold"]
+        self.assertGreaterEqual(len(call_audio_interrupts), 1, "Expected automatic call audio threshold interruptions to be triggered")
+
+        manual_interrupts = [call_details for call_details in interrupt_calls if call_details["reason"] == "test_interrupt"]
+        self.assertTrue(manual_interrupts, "Expected manual interrupt_current_lecture event to trigger interruption")
+        self.assertAlmostEqual(manual_interrupts[0]["duration"], 0.5, delta=0.05)
 
         # Verify bot events in sequence
         bot_events = self.bot.bot_events.all()

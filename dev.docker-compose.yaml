@@ -52,7 +52,8 @@ services:
       - "8001:8000"
     environment:
       - DJANGO_SETTINGS_MODULE=attendee.settings.development
-      # - ENABLE_CHROME_SANDBOX=true
+      - ENABLE_CHROME_SANDBOX=true
+      - ENABLE_CHROME_SANDBOX_FOR_WEBPAGE_STREAMER=false
     command: "python bots/webpage_streamer/run_webpage_streamer.py"
     # security_opt:
     #   - seccomp=./bots/web_bot_adapter/chrome_seccomp.json

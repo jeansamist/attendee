@@ -57,6 +57,30 @@ When you want the bot to speak audio in the meeting, send a message in this form
 
 The `chunk` field is base64-encoded 16-bit single-channel PCM audio data. The sample rate can be `8000`, `16000` or `24000`.
 
+### Interrupting Audio Playback
+
+You can temporarily pause the bot's realtime playback by sending an interrupt event. The bot will pause any queued audio and resume after the specified duration.
+
+```json
+{
+  "trigger": "realtime_audio.interrupt_current_lecture",
+  "data": {
+    "duration": 1.5,
+    "reason": "host_question"
+  }
+}
+```
+
+- `duration` is expressed in seconds. If you prefer milliseconds, use `duration_ms` instead.
+- `reason` is optional and is logged for debugging.
+- If `duration` and `duration_ms` are both omitted the interruption defaults to `0.8` seconds.
+
+While the interruption is active Attendee buffers incoming audio and resumes playback automatically when the window elapses.
+
+### Automatic interruption during meeting speech
+
+Attendee automatically pauses realtime bot output when the mixed meeting audio surpasses a speech threshold. This prevents the bot from talking over live participants. The queued audio resumes 800ms after the meeting audio drops below the threshold or when the manual interruption duration expires.
+
 ## Integration with Voice Agent APIs
 
 The realtime audio streaming can be easily integrated with voice agent APIs to bring voice agents into meetings.

@@ -2150,6 +2150,22 @@ function turnOffMicAndScreenshare() {
 }
 
 
+        this.botOutputAudioTrack = this.destination.stream.getAudioTracks()[0];
+        
+        // Initialize audio queue for continuous playback
+        this.audioQueue = [];
+        this.nextPlayTime = 0;
+        this.isPlaying = false;
+        this.sampleRate = 44100; // Default sample rate
+        this.numChannels = 1;    // Default channels
+        this.turnOffMicTimeout = null;
+        
+        // Interrupt state for pausing audio playback
+        this.interruptUntil = 0.0;
+        this.interruptResumeTimeout = null;
+        
+        // Active audio sources that are currently playing (to stop them on interrupt)
+        this.activeAudioSources = [];
 function turnOnScreenshare() {
     // Click screenshare button to turn it on
     const screenshareButton = document.querySelector(`button[aria-label="${turnOnScreenshareArialLabel}"]`) || document.querySelector(`div[aria-label="${turnOnScreenshareArialLabel}"]`);
@@ -2165,6 +2181,147 @@ function turnOnScreenshare() {
     botOutputMediaStreamSource.connect(window.botOutputManager.gainNode);
 }
 
+        // Make sure audio context is initialized
+        this.initializeBotOutputAudioTrack();
+        
+        // Update properties if they've changed
+        if (this.sampleRate !== sampleRate || this.numChannels !== numChannels) {
+            this.sampleRate = sampleRate;
+            this.numChannels = numChannels;
+        }
+        
+        // Convert Int16 PCM data to Float32 with proper scaling
+        let audioData;
+        if (pcmData instanceof Float32Array) {
+            audioData = pcmData;
+        } else {
+            // Create a Float32Array of the same length
+            audioData = new Float32Array(pcmData.length);
+            // Scale Int16 values (-32768 to 32767) to Float32 range (-1.0 to 1.0)
+            for (let i = 0; i < pcmData.length; i++) {
+                // Division by 32768.0 scales the range correctly
+                audioData[i] = pcmData[i] / 32768.0;
+            }
+        }
+        
+        // Add to queue with timing information
+        const chunk = {
+            data: audioData,
+            duration: audioData.length / (numChannels * sampleRate)
+        };
+        
+        this.audioQueue.push(chunk);
+        
+        // Start playing if not already
+        if (!this.isPlaying) {
+            this.processAudioQueue();
+        }
+    }
+    
+    interruptCurrentLecture(durationSeconds, reason = null) {
+        if (durationSeconds <= 0) {
+            return;
+        }
+
+        const now = performance.now() / 1000.0; // Convert to seconds
+        const newInterruptUntil = now + durationSeconds;
+        
+        // Stop all currently playing audio sources immediately
+        if (this.activeAudioSources.length > 0) {
+            console.log(`Stopping ${this.activeAudioSources.length} active audio source(s) immediately`);
+            // Stop all active sources
+            for (const source of this.activeAudioSources) {
+                try {
+                    source.stop();
+                } catch (e) {
+                    // Source might already be stopped, ignore error
+                }
+            }
+            // Clear the array
+            this.activeAudioSources = [];
+        }
+        
+        // Set isPlaying to false since we stopped all sources
+        this.isPlaying = false;
+        
+        // Only extend interruption if the new time is later
+        if (newInterruptUntil > this.interruptUntil) {
+            this.interruptUntil = newInterruptUntil;
+            
+            // Clear any existing resume timeout
+            if (this.interruptResumeTimeout) {
+                clearTimeout(this.interruptResumeTimeout);
+            }
+            
+            // Schedule resumption
+            const resumeDelayMs = durationSeconds * 1000;
+            this.interruptResumeTimeout = setTimeout(() => {
+                this.interruptUntil = 0.0;
+                this.interruptResumeTimeout = null;
+                
+                // Resume processing audio queue if there are chunks queued
+                if (this.audioQueue.length > 0 && !this.isPlaying) {
+                    this.processAudioQueue();
+                }
+            }, resumeDelayMs);
+            
+            console.log(`Interrupting lecture for ${durationSeconds}s${reason ? ` (${reason})` : ''}`);
+        }
+    }
+
+    processAudioQueue() {
+        if (this.audioQueue.length === 0) {
+            this.isPlaying = false;
+
+            if (this.turnOffMicTimeout) {
+                clearTimeout(this.turnOffMicTimeout);
+                this.turnOffMicTimeout = null;
+            }
+            
+            // Delay turning off the mic by 2 second and check if queue is still empty
+            this.turnOffMicTimeout = setTimeout(() => {
+                // Only turn off mic if the queue is still empty
+                if (this.audioQueue.length === 0)
+                    turnOffMic();
+            }, 2000);
+            
+            return;
+        }
+        
+        // Check if we're currently interrupted
+        const now = performance.now() / 1000.0; // Convert to seconds
+        if (this.interruptUntil > now) {
+            // We're interrupted, check again soon
+            const remainingMs = (this.interruptUntil - now) * 1000;
+            setTimeout(() => this.processAudioQueue(), Math.min(remainingMs, 50));
+            return;
+        }
+        
+        // Interruption has ended, clear it
+        if (this.interruptUntil > 0.0) {
+            this.interruptUntil = 0.0;
+        }
+        
+        this.isPlaying = true;
+        
+        // Get current time and next play time
+        const currentTime = this.audioContextForBotOutput.currentTime;
+        this.nextPlayTime = Math.max(currentTime, this.nextPlayTime);
+        
+        // Get next chunk
+        const chunk = this.audioQueue.shift();
+        
+        // Create buffer for this chunk
+        const audioBuffer = this.audioContextForBotOutput.createBuffer(
+            this.numChannels,
+            chunk.data.length / this.numChannels,
+            this.sampleRate
+        );
+        
+        // Fill the buffer
+        if (this.numChannels === 1) {
+            const channelData = audioBuffer.getChannelData(0);
+            channelData.set(chunk.data);
 function turnOffScreenshare() {
     // Find the span that has the right class/jsname
     const stopPresentingSpan = document.querySelector('button span.UywwFc-vQzf8d[jsname="V67aGc"]')
@@ -2177,6 +2334,107 @@ function turnOffScreenshare() {
         } else {
             console.log('Found "Stop presenting" span but no parent button');
         }
+        
+        // Create source and schedule it
+        const source = this.audioContextForBotOutput.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(this.gainNode);
+        
+        // Add to active sources list so we can stop it on interrupt
+        this.activeAudioSources.push(source);
+        
+        // Clean up source when it ends (whether naturally or stopped)
+        source.onended = () => {
+            // Remove from active sources
+            const index = this.activeAudioSources.indexOf(source);
+            if (index > -1) {
+                this.activeAudioSources.splice(index, 1);
+            }
+        };
+        
+        // Schedule precisely
+        source.start(this.nextPlayTime);
+        this.nextPlayTime += chunk.duration;
+        
+        // Schedule the next chunk processing
+        const timeUntilNextProcess = (this.nextPlayTime - currentTime) * 1000 * 0.8;
+        setTimeout(() => this.processAudioQueue(), Math.max(0, timeUntilNextProcess));
+    }
+
+    async getBotOutputPeerConnectionOffer() {
+        try
+        {
+            // 2) Create the RTCPeerConnection
+            this.botOutputPeerConnection = new RTCPeerConnection();
+        
+            // 3) Receive the server's *video* and *audio*
+            const ms = new MediaStream();
+            this.botOutputPeerConnection.ontrack = (ev) => {
+                ms.addTrack(ev.track);
+                // If we've received both video and audio, play the stream
+                if (ms.getVideoTracks().length > 0 && ms.getAudioTracks().length > 0) {
+                    botOutputManager.playMediaStream(ms);
+                }
+            };
+        
+            // We still want to receive the server's video
+            this.botOutputPeerConnection.addTransceiver('video', { direction: 'recvonly' });
+        
+            // ❗ Instead of recvonly audio, we now **send** our mic upstream:
+            const meetingAudioStream = window.styleManager.getMeetingAudioStream();
+            for (const track of meetingAudioStream.getAudioTracks()) {
+                this.botOutputPeerConnection.addTrack(track, meetingAudioStream);
+            }
+        
+            // Create/POST offer → set remote answer
+            const offer = await this.botOutputPeerConnection.createOffer();
+            await this.botOutputPeerConnection.setLocalDescription(offer);
+            return { sdp: this.botOutputPeerConnection.localDescription.sdp, type: this.botOutputPeerConnection.localDescription.type };
+        }
+        catch (e) {
+            return { error: e.message };
+        }
+    }
+
+    async startBotOutputPeerConnection(offerResponse) {
+        await this.botOutputPeerConnection.setRemoteDescription(offerResponse);
+        
+        // Start latency measurement for the bot output peer connection
+        this.startLatencyMeter(this.botOutputPeerConnection, "bot-output");
+    }
+
+    startLatencyMeter(pc, label="rx") {
+        setInterval(async () => {
+            const stats = await pc.getStats();
+            let rtt_ms = 0, jb_a_ms = 0, jb_v_ms = 0, dec_v_ms = 0;
+
+            stats.forEach(r => {
+                if (r.type === 'candidate-pair' && r.state === 'succeeded' && r.nominated) {
+                    rtt_ms = (r.currentRoundTripTime || 0) * 1000;
+                }
+                if (r.type === 'inbound-rtp' && r.kind === 'audio') {
+                    const d = (r.jitterBufferDelay || 0);
+                    const n = (r.jitterBufferEmittedCount || 1);
+                    jb_a_ms = (d / n) * 1000;
+                }
+                if (r.type === 'inbound-rtp' && r.kind === 'video') {
+                    const d = (r.jitterBufferDelay || 0);
+                    const n = (r.jitterBufferEmittedCount || 1);
+                    jb_v_ms = (d / n) * 1000;
+                    dec_v_ms = ((r.totalDecodeTime || 0) / (r.framesDecoded || 1)) * 1000;
+                }
+            });
+
+            const est_audio_owd = (rtt_ms / 2) + jb_a_ms;
+            const est_video_owd = (rtt_ms / 2) + jb_v_ms + dec_v_ms;
+
+            const logStatement = `[${label}] est one-way: audio≈${est_audio_owd|0}ms, video≈${est_video_owd|0}ms  (rtt=${rtt_ms|0}, jb_a=${jb_a_ms|0}, jb_v=${jb_v_ms|0}, dec_v=${dec_v_ms|0})`;
+            console.log(logStatement);
+            window.ws.sendJson({
+                type: 'BOT_OUTPUT_PEER_CONNECTION_STATS',
+                logStatement: logStatement
+            });
+        }, 60000);
     } else {
         console.log('"Stop presenting" button not found');
     }
